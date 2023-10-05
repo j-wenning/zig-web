@@ -38,126 +38,202 @@ const RouteIdent = union(RouteIdentType) {
     }
 };
 
-const RouteMiddleware = *const fn (error_message: *[]const u8) anyerror!void;
+fn RouteMiddleware(comptime Context: type, comptime ErrorContext: type) type {
+    return *const fn (
+        allocator: std.mem.Allocator,
+        request: *std.http.Server.Request,
+        request_context: *Context,
+        error_context: *ErrorContext,
+    ) anyerror!void;
+}
 
-const RouteHandler = struct { method: std.http.Method, middleware: RouteMiddleware };
+fn RouteHandler(comptime Context: type, comptime ErrorContext: type) type {
+    return struct {
+        method: std.http.Method,
+        middleware: RouteMiddleware(Context, ErrorContext),
+    };
+}
 
 const RouteNodeValueType = enum {
     middleware,
     handler,
 };
 
-const RouteNodeValue = union(RouteNodeValueType) {
-    middleware: RouteMiddleware,
-    handler: RouteHandler,
-};
+fn RouteNodeValue(comptime Context: type, comptime ErrorContext: type) type {
+    return union(RouteNodeValueType) {
+        middleware: RouteMiddleware(Context, ErrorContext),
+        handler: RouteHandler(Context, ErrorContext),
+    };
+}
 
-const RouteNode = struct {
-    const Self = @This();
+fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
+    const OwnRouteNodeValue = RouteNodeValue(Context, ErrorContext);
+    const OwnRouteMiddleware = RouteMiddleware(Context, ErrorContext);
+    const OwnRouteHandler = RouteHandler(Context, ErrorContext);
 
-    ident: RouteIdent,
-    children: []Self,
-    middlewares: []RouteMiddleware,
-    handlers: []RouteHandler,
+    return struct {
+        const Self = @This();
 
-    fn init(ident: RouteIdent) Self {
-        return Self{
-            .ident = ident,
-            .children = &[_]Self{},
-            .middlewares = &[_]RouteMiddleware{},
-            .handlers = &[_]RouteHandler{},
-        };
-    }
+        ident: RouteIdent,
+        children: []Self,
+        middlewares: []OwnRouteMiddleware,
+        handlers: []OwnRouteHandler,
 
-    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        for (self.children) |*child| {
-            child.deinit(allocator);
-        }
-        allocator.free(self.children);
-        allocator.free(self.middlewares);
-        allocator.free(self.handlers);
-    }
-
-    fn add(root: *Self, allocator: std.mem.Allocator, path: []const u8, value: RouteNodeValue) !void {
-        var path_segment_iter = std.mem.splitScalar(u8, path, path_separator);
-
-        var node = root;
-        while (path_segment_iter.next()) |segment| {
-            const ident = RouteIdent.parse(segment);
-            node = for (node.children) |*child| {
-                if (RouteIdent.cmp(&child.ident, &ident)) {
-                    break @constCast(child);
-                }
-            } else try slice.append(Self, allocator, &node.children, Self.init(ident));
+        fn init(ident: RouteIdent) Self {
+            return Self{
+                .ident = ident,
+                .children = &[_]Self{},
+                .middlewares = &[_]OwnRouteMiddleware{},
+                .handlers = &[_]OwnRouteHandler{},
+            };
         }
 
-        switch (value) {
-            .middleware => |middleware| _ = try slice.append(RouteMiddleware, allocator, &node.middlewares, middleware),
-            .handler => |handler| _ = try slice.append(RouteHandler, allocator, &node.handlers, handler),
-        }
-    }
-};
-
-pub const RouteTree = struct {
-    const Self = @This();
-
-    root: RouteNode,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return Self{
-            .allocator = allocator,
-            .root = RouteNode.init(RouteIdent{ .name = "/" }),
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.root.deinit(self.allocator);
-    }
-
-    pub fn addMiddleware(self: *Self, path: []const u8, middleware: RouteMiddleware) !void {
-        try RouteNode.add(&self.root, self.allocator, path, RouteNodeValue{ .middleware = middleware });
-    }
-
-    pub fn addHandler(self: *Self, method: std.http.Method, path: []const u8, handler: RouteMiddleware) !void {
-        try RouteNode.add(&self.root, self.allocator, path, RouteNodeValue{ .handler = .{ .method = method, .middleware = handler } });
-    }
-
-    pub fn collect(
-        self: *Self,
-        method: std.http.Method,
-        path: []const u8,
-        middleware_accumulator: *std.ArrayList(RouteMiddleware),
-        param_accumulator: *std.ArrayList([]const u8),
-    ) !void {
-        var segments = std.mem.splitScalar(u8, path, path_separator);
-        var node = &self.root;
-        while (segments.next()) |segment| {
-            node = for (node.children) |*child| {
-                switch (child.ident) {
-                    .name => |name| if (!std.mem.eql(u8, name, segment)) continue,
-                    .param => try param_accumulator.append(segment),
-                }
-                try middleware_accumulator.appendSlice(child.middlewares);
-                break child;
-            } else return error.RouteNotFound;
-        }
-        const handler = for (node.handlers) |*handler| {
-            if (handler.method == method) {
-                break handler.*.middleware;
+        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            for (self.children) |*child| {
+                child.deinit(allocator);
             }
-        } else return error.RouteNotFound;
+            allocator.free(self.children);
+            allocator.free(self.middlewares);
+            allocator.free(self.handlers);
+        }
 
-        try middleware_accumulator.append(handler);
-    }
-};
+        fn add(
+            root: *Self,
+            allocator: std.mem.Allocator,
+            path: []const u8,
+            value: OwnRouteNodeValue,
+        ) !void {
+            var path_segment_iter = std.mem.splitScalar(u8, path, path_separator);
 
-fn mockMiddleware(error_message: *[]const u8) !void {
+            var node = root;
+            while (path_segment_iter.next()) |segment| {
+                const ident = RouteIdent.parse(segment);
+                node = for (node.children) |*child| {
+                    if (RouteIdent.cmp(&child.ident, &ident)) {
+                        break @constCast(child);
+                    }
+                } else try slice.append(
+                    Self,
+                    allocator,
+                    &node.children,
+                    Self.init(ident),
+                );
+            }
+
+            switch (value) {
+                .middleware => |middleware| _ = try slice.append(
+                    OwnRouteMiddleware,
+                    allocator,
+                    &node.middlewares,
+                    middleware,
+                ),
+                .handler => |handler| _ = try slice.append(
+                    OwnRouteHandler,
+                    allocator,
+                    &node.handlers,
+                    handler,
+                ),
+            }
+        }
+    };
+}
+
+pub fn RouteTree(comptime Context: type, comptime ErrorContext: type) type {
+    const OwnRouteNodeValue = RouteNodeValue(Context, ErrorContext);
+    const OwnRouteNode = RouteNode(Context, ErrorContext);
+    const OwnRouteMiddleware = RouteMiddleware(Context, ErrorContext);
+
+    return struct {
+        const Self = @This();
+
+        pub const MiddlewareAccumulator = std.ArrayList(OwnRouteMiddleware);
+        pub const ParamAccumulator = std.ArrayList([]const u8);
+
+        root: OwnRouteNode,
+        allocator: std.mem.Allocator,
+
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return Self{
+                .allocator = allocator,
+                .root = OwnRouteNode.init(RouteIdent{ .name = "/" }),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.root.deinit(self.allocator);
+        }
+
+        pub fn addMiddleware(
+            self: *Self,
+            path: []const u8,
+            middleware: OwnRouteMiddleware,
+        ) !void {
+            try OwnRouteNode.add(
+                &self.root,
+                self.allocator,
+                path,
+                OwnRouteNodeValue{ .middleware = middleware },
+            );
+        }
+
+        pub fn addHandler(
+            self: *Self,
+            method: std.http.Method,
+            path: []const u8,
+            handler: OwnRouteMiddleware,
+        ) !void {
+            try OwnRouteNode.add(
+                &self.root,
+                self.allocator,
+                path,
+                OwnRouteNodeValue{ .handler = .{ .method = method, .middleware = handler } },
+            );
+        }
+
+        pub fn collect(
+            self: *Self,
+            method: std.http.Method,
+            path: []const u8,
+            middleware_accumulator: *MiddlewareAccumulator,
+            param_accumulator: *ParamAccumulator,
+        ) !void {
+            var segments = std.mem.splitScalar(u8, path, path_separator);
+            var node = &self.root;
+            while (segments.next()) |segment| {
+                node = for (node.children) |*child| {
+                    switch (child.ident) {
+                        .name => |name| if (!std.mem.eql(u8, name, segment)) continue,
+                        .param => try param_accumulator.append(segment),
+                    }
+                    try middleware_accumulator.appendSlice(child.middlewares);
+                    break child;
+                } else return error.RouteNotFound;
+            }
+            const handler = for (node.handlers) |*handler| {
+                if (handler.method == method) {
+                    break handler.*.middleware;
+                }
+            } else return error.RouteNotFound;
+
+            try middleware_accumulator.append(handler);
+        }
+    };
+}
+
+fn mockMiddleware(
+    allocator: std.mem.Allocator,
+    request: *std.http.Server.Request,
+    context: *void,
+    error_message: *void,
+) !void {
+    _ = allocator;
+    _ = context;
+    _ = request;
     _ = error_message;
 }
 
 test "route allocations should not leak" {
-    var tree = RouteTree.init(std.testing.allocator);
+    var tree = RouteTree(void, void).init(std.testing.allocator);
     defer tree.deinit();
 
     try tree.addHandler(.GET, "foo", mockMiddleware);
@@ -178,13 +254,14 @@ test "route allocations should not leak" {
 }
 
 test "traversal returns expected result" {
-    var tree = RouteTree.init(std.testing.allocator);
+    const RT = RouteTree(void, void);
+    var tree = RT.init(std.testing.allocator);
     defer tree.deinit();
 
-    var macc = std.ArrayList(RouteMiddleware).init(std.testing.allocator);
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
-    var pacc = std.ArrayList([]const u8).init(std.testing.allocator);
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
     try tree.addHandler(.GET, "foo", mockMiddleware);
@@ -211,13 +288,14 @@ test "traversal returns expected result" {
 }
 
 test "traversal results in expected collections of middleware" {
-    var tree = RouteTree.init(std.testing.allocator);
+    const RT = RouteTree(void, void);
+    var tree = RT.init(std.testing.allocator);
     defer tree.deinit();
 
-    var macc = std.ArrayList(RouteMiddleware).init(std.testing.allocator);
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
-    var pacc = std.ArrayList([]const u8).init(std.testing.allocator);
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
     // Pure handlers
@@ -256,13 +334,14 @@ test "traversal results in expected collections of middleware" {
 }
 
 test "traversal results in expected collections of params" {
-    var tree = RouteTree.init(std.testing.allocator);
+    const RT = RouteTree(void, void);
+    var tree = RT.init(std.testing.allocator);
     defer tree.deinit();
 
-    var macc = std.ArrayList(RouteMiddleware).init(std.testing.allocator);
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
-    var pacc = std.ArrayList([]const u8).init(std.testing.allocator);
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
     try tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
