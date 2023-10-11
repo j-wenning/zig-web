@@ -40,7 +40,6 @@ const RouteIdent = union(RouteIdentType) {
 
 fn RouteMiddleware(comptime Context: type, comptime ErrorContext: type) type {
     return *const fn (
-        allocator: std.mem.Allocator,
         request: *std.http.Server.Request,
         request_context: *Context,
         error_context: *ErrorContext,
@@ -79,7 +78,7 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
         middlewares: []OwnRouteMiddleware,
         handlers: []OwnRouteHandler,
 
-        fn init(ident: RouteIdent) Self {
+        fn init(comptime ident: RouteIdent) Self {
             return Self{
                 .ident = ident,
                 .children = &[_]Self{},
@@ -88,21 +87,11 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
             };
         }
 
-        fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            for (self.children) |*child| {
-                child.deinit(allocator);
-            }
-            allocator.free(self.children);
-            allocator.free(self.middlewares);
-            allocator.free(self.handlers);
-        }
-
         fn add(
-            root: *Self,
-            allocator: std.mem.Allocator,
-            path: []const u8,
-            value: OwnRouteNodeValue,
-        ) !void {
+            comptime root: *Self,
+            comptime path: []const u8,
+            comptime value: OwnRouteNodeValue,
+        ) void {
             var path_segment_iter = std.mem.splitScalar(u8, path, path_separator);
 
             var node = root;
@@ -112,24 +101,16 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
                     if (RouteIdent.cmp(&child.ident, &ident)) {
                         break @constCast(child);
                     }
-                } else try slice.append(
-                    Self,
-                    allocator,
-                    &node.children,
-                    Self.init(ident),
-                );
+                } else slice.append(Self, &node.children, Self.init(ident));
             }
-
             switch (value) {
-                .middleware => |middleware| _ = try slice.append(
+                .middleware => |middleware| _ = slice.append(
                     OwnRouteMiddleware,
-                    allocator,
                     &node.middlewares,
                     middleware,
                 ),
-                .handler => |handler| _ = try slice.append(
+                .handler => |handler| _ = slice.append(
                     OwnRouteHandler,
-                    allocator,
                     &node.handlers,
                     handler,
                 ),
@@ -150,48 +131,40 @@ pub fn RouteTree(comptime Context: type, comptime ErrorContext: type) type {
         pub const ParamAccumulator = std.ArrayList([]const u8);
 
         root: OwnRouteNode,
-        allocator: std.mem.Allocator,
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init() Self {
             return Self{
-                .allocator = allocator,
                 .root = OwnRouteNode.init(RouteIdent{ .name = "/" }),
             };
         }
 
-        pub fn deinit(self: *Self) void {
-            self.root.deinit(self.allocator);
-        }
-
         pub fn addMiddleware(
-            self: *Self,
-            path: []const u8,
-            middleware: OwnRouteMiddleware,
-        ) !void {
-            try OwnRouteNode.add(
+            comptime self: *Self,
+            comptime path: []const u8,
+            comptime middleware: OwnRouteMiddleware,
+        ) void {
+            OwnRouteNode.add(
                 &self.root,
-                self.allocator,
                 path,
                 OwnRouteNodeValue{ .middleware = middleware },
             );
         }
 
         pub fn addHandler(
-            self: *Self,
-            method: std.http.Method,
-            path: []const u8,
-            handler: OwnRouteMiddleware,
-        ) !void {
-            try OwnRouteNode.add(
+            comptime self: *Self,
+            comptime method: std.http.Method,
+            comptime path: []const u8,
+            comptime handler: OwnRouteMiddleware,
+        ) void {
+            OwnRouteNode.add(
                 &self.root,
-                self.allocator,
                 path,
                 OwnRouteNodeValue{ .handler = .{ .method = method, .middleware = handler } },
             );
         }
 
         pub fn collect(
-            self: *Self,
+            comptime self: *Self,
             method: std.http.Method,
             path: []const u8,
             middleware_accumulator: *MiddlewareAccumulator,
@@ -221,51 +194,53 @@ pub fn RouteTree(comptime Context: type, comptime ErrorContext: type) type {
 }
 
 fn mockMiddleware(
-    allocator: std.mem.Allocator,
     request: *std.http.Server.Request,
     context: *void,
-    error_message: *void,
+    error_context: *void,
 ) !void {
-    _ = allocator;
+    _ = error_context;
     _ = context;
     _ = request;
-    _ = error_message;
 }
 
 test "route allocations should not leak" {
-    var tree = RouteTree(void, void).init(std.testing.allocator);
-    defer tree.deinit();
+    comptime {
+        var tree = RouteTree(void, void).init();
 
-    try tree.addHandler(.GET, "foo", mockMiddleware);
-    try tree.addHandler(.GET, "foo", mockMiddleware);
-    try tree.addHandler(.GET, "bar", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar", mockMiddleware);
-    try tree.addHandler(.GET, "bar/baz", mockMiddleware);
+        tree.addHandler(.GET, "foo", mockMiddleware);
+        tree.addHandler(.GET, "foo", mockMiddleware);
+        tree.addHandler(.GET, "bar", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar", mockMiddleware);
+        tree.addHandler(.GET, "bar/baz", mockMiddleware);
 
-    try tree.addMiddleware("foo", mockMiddleware);
-    try tree.addMiddleware("foo", mockMiddleware);
-    try tree.addMiddleware("bar", mockMiddleware);
-    try tree.addMiddleware("foo/bar", mockMiddleware);
-    try tree.addMiddleware("foo/bar/baz", mockMiddleware);
-    try tree.addMiddleware("foo/bar", mockMiddleware);
-    try tree.addMiddleware("bar/baz", mockMiddleware);
+        tree.addMiddleware("foo", mockMiddleware);
+        tree.addMiddleware("foo", mockMiddleware);
+        tree.addMiddleware("bar", mockMiddleware);
+        tree.addMiddleware("foo/bar", mockMiddleware);
+        tree.addMiddleware("foo/bar/baz", mockMiddleware);
+        tree.addMiddleware("foo/bar", mockMiddleware);
+        tree.addMiddleware("bar/baz", mockMiddleware);
+    }
 }
 
 test "traversal returns expected result" {
     const RT = RouteTree(void, void);
-    var tree = RT.init(std.testing.allocator);
-    defer tree.deinit();
+    comptime var tree = blk: {
+        var tree = RT.init();
+
+        tree.addHandler(.GET, "foo", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
+
+        break :blk tree;
+    };
 
     var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
-
-    try tree.addHandler(.GET, "foo", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
 
     try tree.collect(.GET, "foo", &macc, &pacc);
 
@@ -289,36 +264,26 @@ test "traversal returns expected result" {
 
 test "traversal results in expected collections of middleware" {
     const RT = RouteTree(void, void);
-    var tree = RT.init(std.testing.allocator);
-    defer tree.deinit();
+
+    comptime var tree = blk: {
+        var tree = RT.init();
+
+        tree.addHandler(.GET, "foo", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
+
+        tree.addMiddleware("foo/bar", mockMiddleware);
+        tree.addMiddleware("foo", mockMiddleware);
+        tree.addMiddleware("foo/bar/baz", mockMiddleware);
+
+        break :blk tree;
+    };
 
     var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
-
-    // Pure handlers
-    try tree.addHandler(.GET, "foo", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
-
-    macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo", &macc, &pacc);
-    try std.testing.expect(macc.items.len == 1);
-
-    macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar", &macc, &pacc);
-    try std.testing.expect(macc.items.len == 1);
-
-    macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc);
-    try std.testing.expect(macc.items.len == 1);
-
-    // Handlers with middleware
-    try tree.addMiddleware("foo/bar", mockMiddleware);
-    try tree.addMiddleware("foo", mockMiddleware);
-    try tree.addMiddleware("foo/bar/baz", mockMiddleware);
 
     macc.clearRetainingCapacity();
     try tree.collect(.GET, "foo", &macc, &pacc);
@@ -335,22 +300,25 @@ test "traversal results in expected collections of middleware" {
 
 test "traversal results in expected collections of params" {
     const RT = RouteTree(void, void);
-    var tree = RT.init(std.testing.allocator);
-    defer tree.deinit();
+    comptime var tree = blk: {
+        var tree = RT.init();
+
+        tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar/*", mockMiddleware);
+        tree.addHandler(.GET, "foo/*/baz", mockMiddleware);
+        tree.addHandler(.GET, "*/bar/baz", mockMiddleware);
+        tree.addHandler(.GET, "foo/*/*", mockMiddleware);
+        tree.addHandler(.GET, "*/*/baz", mockMiddleware);
+        tree.addHandler(.GET, "*/*/*", mockMiddleware);
+
+        break :blk tree;
+    };
 
     var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
-
-    try tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
-    try tree.addHandler(.GET, "foo/bar/*", mockMiddleware);
-    try tree.addHandler(.GET, "foo/*/baz", mockMiddleware);
-    try tree.addHandler(.GET, "*/bar/baz", mockMiddleware);
-    try tree.addHandler(.GET, "foo/*/*", mockMiddleware);
-    try tree.addHandler(.GET, "*/*/baz", mockMiddleware);
-    try tree.addHandler(.GET, "*/*/*", mockMiddleware);
 
     pacc.clearRetainingCapacity();
     try tree.collect(.GET, "foo/bar/baz", &macc, &pacc);
