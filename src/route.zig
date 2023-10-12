@@ -55,12 +55,14 @@ fn RouteHandler(comptime Context: type) type {
 const RouteNodeValueType = enum {
     middleware,
     handler,
+    prefix,
 };
 
 fn RouteNodeValue(comptime Context: type) type {
     return union(RouteNodeValueType) {
         middleware: RouteMiddleware(Context),
         handler: RouteHandler(Context),
+        prefix: void,
     };
 }
 
@@ -90,11 +92,13 @@ fn RouteNode(comptime Context: type) type {
             comptime root: *Self,
             comptime path: []const u8,
             comptime value: OwnRouteNodeValue,
-        ) void {
+        ) *Self {
             var path_segment_iter = std.mem.splitScalar(u8, path, path_separator);
-
             var node = root;
             while (path_segment_iter.next()) |segment| {
+                if (std.mem.eql(u8, segment, "")) {
+                    continue;
+                }
                 const ident = RouteIdent.parse(segment);
                 node = for (node.children) |*child| {
                     if (RouteIdent.cmp(&child.ident, &ident)) {
@@ -113,13 +117,38 @@ fn RouteNode(comptime Context: type) type {
                     &node.handlers,
                     handler,
                 ),
+                .prefix => {},
             }
+            return node;
+        }
+
+        pub fn addPrefix(
+            comptime self: *Self,
+            comptime path: []const u8,
+        ) *Self {
+            return self.add(path, .{ .prefix = undefined });
+        }
+
+        pub fn addMiddleware(
+            comptime self: *Self,
+            comptime path: []const u8,
+            comptime middleware: OwnRouteMiddleware,
+        ) void {
+            _ = self.add(path, .{ .middleware = middleware });
+        }
+
+        pub fn addHandler(
+            comptime self: *Self,
+            comptime method: std.http.Method,
+            comptime path: []const u8,
+            comptime handler: OwnRouteMiddleware,
+        ) void {
+            _ = self.add(path, .{ .handler = .{ .method = method, .middleware = handler } });
         }
     };
 }
 
 pub fn RouteTree(comptime Context: type) type {
-    const OwnRouteNodeValue = RouteNodeValue(Context);
     const OwnRouteNode = RouteNode(Context);
     const OwnRouteMiddleware = RouteMiddleware(Context);
 
@@ -137,16 +166,19 @@ pub fn RouteTree(comptime Context: type) type {
             };
         }
 
+        pub fn addPrefix(
+            comptime self: *Self,
+            comptime path: []const u8,
+        ) *OwnRouteNode {
+            return self.root.addPrefix(path);
+        }
+
         pub fn addMiddleware(
             comptime self: *Self,
             comptime path: []const u8,
             comptime middleware: OwnRouteMiddleware,
         ) void {
-            OwnRouteNode.add(
-                &self.root,
-                path,
-                OwnRouteNodeValue{ .middleware = middleware },
-            );
+            _ = self.root.addMiddleware(path, middleware);
         }
 
         pub fn addHandler(
@@ -155,11 +187,7 @@ pub fn RouteTree(comptime Context: type) type {
             comptime path: []const u8,
             comptime handler: OwnRouteMiddleware,
         ) void {
-            OwnRouteNode.add(
-                &self.root,
-                path,
-                OwnRouteNodeValue{ .handler = .{ .method = method, .middleware = handler } },
-            );
+            _ = self.root.addHandler(method, path, handler);
         }
 
         pub fn collect(
@@ -172,6 +200,9 @@ pub fn RouteTree(comptime Context: type) type {
             var segments = std.mem.splitScalar(u8, path, path_separator);
             var node = &self.root;
             while (segments.next()) |segment| {
+                if (std.mem.eql(u8, segment, "")) {
+                    continue;
+                }
                 node = for (node.children) |*child| {
                     switch (child.ident) {
                         .name => |name| if (!std.mem.eql(u8, name, segment)) continue,
@@ -322,4 +353,28 @@ test "traversal results in expected collections of params" {
     pacc.clearRetainingCapacity();
     try tree.collect(.GET, "a/a/a", &macc, &pacc);
     try std.testing.expect(pacc.items.len == 3);
+}
+
+test "prefixes return expected nodes" {
+    const RT = RouteTree(void);
+    comptime var tree = blk: {
+        var tree = RT.init();
+
+        var foo = tree.addPrefix("foo");
+        foo.addMiddleware("/", mockMiddleware);
+        var baz = foo.addPrefix("bar").addPrefix("baz");
+        baz.addHandler(.GET, "qux", mockMiddleware);
+
+        break :blk tree;
+    };
+
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
+    defer macc.deinit();
+
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
+    defer pacc.deinit();
+
+    macc.clearRetainingCapacity();
+    try tree.collect(.GET, "foo/bar/baz/qux", &macc, &pacc);
+    try std.testing.expect(macc.items.len == 2);
 }
