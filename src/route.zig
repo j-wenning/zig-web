@@ -74,12 +74,15 @@ fn RouteNode(comptime Context: type) type {
     return struct {
         const Self = @This();
 
+        pub const MiddlewareAccumulator = std.ArrayList(OwnRouteMiddleware);
+        pub const ParamAccumulator = std.ArrayList([]const u8);
+
         ident: RouteIdent,
         children: []Self,
         middlewares: []OwnRouteMiddleware,
         handlers: []OwnRouteHandler,
 
-        fn init(comptime ident: RouteIdent) Self {
+        fn initInternal(comptime ident: RouteIdent) Self {
             return Self{
                 .ident = ident,
                 .children = &[_]Self{},
@@ -104,7 +107,7 @@ fn RouteNode(comptime Context: type) type {
                     if (RouteIdent.cmp(&child.ident, &ident)) {
                         break @constCast(child);
                     }
-                } else slice.append(Self, &node.children, Self.init(ident));
+                } else slice.append(Self, &node.children, Self.initInternal(ident));
             }
             switch (value) {
                 .middleware => |middleware| _ = slice.append(
@@ -120,6 +123,10 @@ fn RouteNode(comptime Context: type) type {
                 .prefix => {},
             }
             return node;
+        }
+
+        pub fn init() Self {
+            return Self.initInternal(.{ .name = "" });
         }
 
         pub fn addPrefix(
@@ -145,50 +152,6 @@ fn RouteNode(comptime Context: type) type {
         ) void {
             _ = self.add(path, .{ .handler = .{ .method = method, .middleware = handler } });
         }
-    };
-}
-
-pub fn RouteTree(comptime Context: type) type {
-    const OwnRouteNode = RouteNode(Context);
-    const OwnRouteMiddleware = RouteMiddleware(Context);
-
-    return struct {
-        const Self = @This();
-
-        pub const MiddlewareAccumulator = std.ArrayList(OwnRouteMiddleware);
-        pub const ParamAccumulator = std.ArrayList([]const u8);
-
-        root: OwnRouteNode,
-
-        pub fn init() Self {
-            return Self{
-                .root = OwnRouteNode.init(RouteIdent{ .name = "" }),
-            };
-        }
-
-        pub fn addPrefix(
-            comptime self: *Self,
-            comptime path: []const u8,
-        ) *OwnRouteNode {
-            return self.root.addPrefix(path);
-        }
-
-        pub fn addMiddleware(
-            comptime self: *Self,
-            comptime path: []const u8,
-            comptime middleware: OwnRouteMiddleware,
-        ) void {
-            _ = self.root.addMiddleware(path, middleware);
-        }
-
-        pub fn addHandler(
-            comptime self: *Self,
-            comptime method: std.http.Method,
-            comptime path: []const u8,
-            comptime handler: OwnRouteMiddleware,
-        ) void {
-            _ = self.root.addHandler(method, path, handler);
-        }
 
         pub fn collect(
             comptime self: *Self,
@@ -198,7 +161,7 @@ pub fn RouteTree(comptime Context: type) type {
             param_accumulator: *ParamAccumulator,
         ) !void {
             var segments = std.mem.splitScalar(u8, path, path_separator);
-            var node = &self.root;
+            var node = self;
             while (segments.next()) |segment| {
                 if (std.mem.eql(u8, segment, "")) {
                     continue;
@@ -221,6 +184,10 @@ pub fn RouteTree(comptime Context: type) type {
             try middleware_accumulator.append(handler);
         }
     };
+}
+
+pub fn RouteTree(comptime Context: type) type {
+    return RouteNode(Context);
 }
 
 fn mockMiddleware(
@@ -377,4 +344,39 @@ test "prefixes return expected nodes" {
     macc.clearRetainingCapacity();
     try tree.collect(.GET, "foo/bar/baz/qux", &macc, &pacc);
     try std.testing.expect(macc.items.len == 2);
+}
+
+test "root/empty path behaves expectedly" {
+    const RT = RouteTree(void);
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
+    defer macc.deinit();
+
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
+    defer pacc.deinit();
+
+    {
+        comptime var empty_tree = RT.init();
+        try std.testing.expectError(
+            error.RouteNotFound,
+            empty_tree.collect(.GET, "/", &macc, &pacc),
+        );
+    }
+    {
+        comptime var empty_tree = RT.init();
+        try std.testing.expectError(
+            error.RouteNotFound,
+            empty_tree.collect(.GET, "", &macc, &pacc),
+        );
+    }
+
+    {
+        comptime var tree = RT.init();
+        comptime tree.addHandler(.GET, "/", mockMiddleware);
+        try tree.collect(.GET, "/", &macc, &pacc);
+    }
+    {
+        comptime var tree = RT.init();
+        comptime tree.addHandler(.GET, "", mockMiddleware);
+        try tree.collect(.GET, "", &macc, &pacc);
+    }
 }
