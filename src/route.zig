@@ -23,7 +23,7 @@ const RouteIdent = union(RouteIdentType) {
         }
     }
 
-    fn cmp(a: *const Self, b: *const Self) bool {
+    fn eql(a: *const Self, b: *const Self) bool {
         const a_val = a.*;
         const b_val = b.*;
 
@@ -107,7 +107,7 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
                 }
                 const ident = RouteIdent.parse(segment);
                 node = for (node.children) |*child| {
-                    if (RouteIdent.cmp(&child.ident, &ident)) {
+                    if (RouteIdent.eql(&child.ident, &ident)) {
                         break @constCast(child);
                     }
                 } else slice.append(Self, &node.children, Self.initInternal(ident));
@@ -172,12 +172,12 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
                 if (std.mem.eql(u8, segment.*, "")) {
                     continue;
                 }
+                try middleware_accumulator.appendSlice(node.middlewares);
                 node = for (node.children) |*child| {
                     switch (child.ident) {
                         .name => |name| if (!std.mem.eql(u8, name, segment.*)) continue,
                         .param => try param_accumulator.append(segment.*),
                     }
-                    try middleware_accumulator.appendSlice(child.middlewares);
                     break child;
                 } else return error.RouteNotFound;
             }
@@ -187,14 +187,13 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
                 }
             } else return error.RouteNotFound;
 
+            try middleware_accumulator.appendSlice(node.middlewares);
             try middleware_accumulator.append(handler);
         }
     };
 }
 
-pub fn RouteTree(comptime Context: type, comptime ErrorContext: type) type {
-    return RouteNode(Context, ErrorContext);
-}
+pub const RouteTree = RouteNode;
 
 fn mockMiddleware(
     response: *std.http.Server.Response,
@@ -437,10 +436,27 @@ test "root/empty path behaves expectedly" {
         comptime var tree = RT.init();
         comptime tree.addHandler(.GET, "/", mockMiddleware);
         try tree.collect(.GET, "/", &macc, &pacc, &query);
+        try tree.collect(.GET, "", &macc, &pacc, &query);
     }
     {
         comptime var tree = RT.init();
         comptime tree.addHandler(.GET, "", mockMiddleware);
+        try tree.collect(.GET, "/", &macc, &pacc, &query);
         try tree.collect(.GET, "", &macc, &pacc, &query);
+    }
+
+    {
+        comptime var tree = RT.init();
+        comptime tree.addMiddleware("", mockMiddleware);
+        comptime tree.addMiddleware("/", mockMiddleware);
+        comptime tree.addHandler(.GET, "/", mockMiddleware);
+
+        macc.clearRetainingCapacity();
+        try tree.collect(.GET, "/", &macc, &pacc, &query);
+        try std.testing.expect(macc.items.len == 3);
+
+        macc.clearRetainingCapacity();
+        try tree.collect(.GET, "", &macc, &pacc, &query);
+        try std.testing.expect(macc.items.len == 3);
     }
 }
