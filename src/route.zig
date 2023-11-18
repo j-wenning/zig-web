@@ -1,5 +1,6 @@
 const std = @import("std");
 const slice = @import("slice.zig");
+
 const path_separator = '/';
 
 const RouteIdentType = enum {
@@ -38,17 +39,18 @@ const RouteIdent = union(RouteIdentType) {
     }
 };
 
-fn RouteMiddleware(comptime Context: type) type {
+fn RouteMiddleware(comptime Context: type, comptime ErrorContext: type) type {
     return *const fn (
         response: *std.http.Server.Response,
         request_context: *Context,
+        error_context: *ErrorContext,
     ) anyerror!void;
 }
 
-fn RouteHandler(comptime Context: type) type {
+fn RouteHandler(comptime Context: type, comptime ErrorContext: type) type {
     return struct {
         method: std.http.Method,
-        middleware: RouteMiddleware(Context),
+        middleware: RouteMiddleware(Context, ErrorContext),
     };
 }
 
@@ -58,18 +60,18 @@ const RouteNodeValueType = enum {
     prefix,
 };
 
-fn RouteNodeValue(comptime Context: type) type {
+fn RouteNodeValue(comptime Context: type, comptime ErrorContext: type) type {
     return union(RouteNodeValueType) {
-        middleware: RouteMiddleware(Context),
-        handler: RouteHandler(Context),
+        middleware: RouteMiddleware(Context, ErrorContext),
+        handler: RouteHandler(Context, ErrorContext),
         prefix: void,
     };
 }
 
-fn RouteNode(comptime Context: type) type {
-    const OwnRouteNodeValue = RouteNodeValue(Context);
-    const OwnRouteMiddleware = RouteMiddleware(Context);
-    const OwnRouteHandler = RouteHandler(Context);
+fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
+    const OwnRouteNodeValue = RouteNodeValue(Context, ErrorContext);
+    const OwnRouteMiddleware = RouteMiddleware(Context, ErrorContext);
+    const OwnRouteHandler = RouteHandler(Context, ErrorContext);
 
     return struct {
         const Self = @This();
@@ -186,20 +188,22 @@ fn RouteNode(comptime Context: type) type {
     };
 }
 
-pub fn RouteTree(comptime Context: type) type {
-    return RouteNode(Context);
+pub fn RouteTree(comptime Context: type, comptime ErrorContext: type) type {
+    return RouteNode(Context, ErrorContext);
 }
 
 fn mockMiddleware(
     response: *std.http.Server.Response,
     context: *void,
+    error_context: *void,
 ) !void {
+    _ = error_context;
     _ = context;
     _ = response;
 }
 
 test "traversal returns expected result" {
-    const RT = RouteTree(void);
+    const RT = RouteTree(void, void);
     comptime var tree = blk: {
         var tree = RT.init();
 
@@ -236,7 +240,7 @@ test "traversal returns expected result" {
 }
 
 test "traversal results in expected collections of middleware" {
-    const RT = RouteTree(void);
+    const RT = RouteTree(void, void);
 
     comptime var tree = blk: {
         var tree = RT.init();
@@ -272,7 +276,7 @@ test "traversal results in expected collections of middleware" {
 }
 
 test "traversal results in expected collections of params" {
-    const RT = RouteTree(void);
+    const RT = RouteTree(void, void);
     comptime var tree = blk: {
         var tree = RT.init();
 
@@ -323,7 +327,7 @@ test "traversal results in expected collections of params" {
 }
 
 test "prefixes return expected nodes" {
-    const RT = RouteTree(void);
+    const RT = RouteTree(void, void);
     comptime var tree = blk: {
         var tree = RT.init();
 
@@ -347,7 +351,7 @@ test "prefixes return expected nodes" {
 }
 
 test "root/empty path behaves expectedly" {
-    const RT = RouteTree(void);
+    const RT = RouteTree(void, void);
     var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
     defer macc.deinit();
 
