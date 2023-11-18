@@ -2,6 +2,7 @@ const std = @import("std");
 const slice = @import("slice.zig");
 
 const path_separator = '/';
+const query_separator = '?';
 
 const RouteIdentType = enum {
     param,
@@ -161,17 +162,20 @@ fn RouteNode(comptime Context: type, comptime ErrorContext: type) type {
             path: []const u8,
             middleware_accumulator: *MiddlewareAccumulator,
             param_accumulator: *ParamAccumulator,
+            query_params: *[]const u8,
         ) !void {
-            var segments = std.mem.splitScalar(u8, path, path_separator);
+            var query_iter = std.mem.splitScalar(u8, path, query_separator);
+            var segments = std.mem.splitScalar(u8, query_iter.first(), path_separator);
+            query_params.* = query_iter.next() orelse "";
             var node = self;
-            while (segments.next()) |segment| {
-                if (std.mem.eql(u8, segment, "")) {
+            while (segments.next()) |*segment| {
+                if (std.mem.eql(u8, segment.*, "")) {
                     continue;
                 }
                 node = for (node.children) |*child| {
                     switch (child.ident) {
-                        .name => |name| if (!std.mem.eql(u8, name, segment)) continue,
-                        .param => try param_accumulator.append(segment),
+                        .name => |name| if (!std.mem.eql(u8, name, segment.*)) continue,
+                        .param => try param_accumulator.append(segment.*),
                     }
                     try middleware_accumulator.appendSlice(child.middlewares);
                     break child;
@@ -207,6 +211,7 @@ test "traversal returns expected result" {
     comptime var tree = blk: {
         var tree = RT.init();
 
+        tree.addHandler(.GET, "", mockMiddleware);
         tree.addHandler(.GET, "foo", mockMiddleware);
         tree.addHandler(.GET, "foo/bar/baz", mockMiddleware);
 
@@ -219,23 +224,25 @@ test "traversal returns expected result" {
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
-    try tree.collect(.GET, "foo", &macc, &pacc);
+    var query: []const u8 = undefined;
 
-    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc);
+    try tree.collect(.GET, "foo", &macc, &pacc, &query);
+
+    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc, &query);
 
     try std.testing.expectError(
         error.RouteNotFound,
-        tree.collect(.GET, "bar", &macc, &pacc),
+        tree.collect(.GET, "/bar", &macc, &pacc, &query),
     );
 
     try std.testing.expectError(
         error.RouteNotFound,
-        tree.collect(.GET, "foo/a", &macc, &pacc),
+        tree.collect(.GET, "/foo/a", &macc, &pacc, &query),
     );
 
     try std.testing.expectError(
         error.RouteNotFound,
-        tree.collect(.GET, "foo/bar/a", &macc, &pacc),
+        tree.collect(.GET, "/foo/bar/a", &macc, &pacc, &query),
     );
 }
 
@@ -262,16 +269,18 @@ test "traversal results in expected collections of middleware" {
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
+    var query: []const u8 = undefined;
+
     macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo", &macc, &pacc);
+    try tree.collect(.GET, "foo", &macc, &pacc, &query);
     try std.testing.expect(macc.items.len == 2);
 
     macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar", &macc, &pacc);
+    try tree.collect(.GET, "foo/bar", &macc, &pacc, &query);
     try std.testing.expect(macc.items.len == 3);
 
     macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc);
+    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc, &query);
     try std.testing.expect(macc.items.len == 4);
 }
 
@@ -297,33 +306,80 @@ test "traversal results in expected collections of params" {
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
+    var query: []const u8 = undefined;
+
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc);
+    try tree.collect(.GET, "foo/bar/baz", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 0);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar/a", &macc, &pacc);
+    try tree.collect(.GET, "foo/bar/a", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 1);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/a/baz", &macc, &pacc);
+    try tree.collect(.GET, "foo/a/baz", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 1);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "a/bar/baz", &macc, &pacc);
+    try tree.collect(.GET, "a/bar/baz", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 1);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/a/a", &macc, &pacc);
+    try tree.collect(.GET, "foo/a/a", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 2);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "a/a/baz", &macc, &pacc);
+    try tree.collect(.GET, "a/a/baz", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 2);
 
     pacc.clearRetainingCapacity();
-    try tree.collect(.GET, "a/a/a", &macc, &pacc);
+    try tree.collect(.GET, "a/a/a", &macc, &pacc, &query);
     try std.testing.expect(pacc.items.len == 3);
+}
+
+test "traversal results in expected collections of query params" {
+    const RT = RouteTree(void, void);
+    comptime var tree = blk: {
+        var tree = RT.init();
+
+        tree.addHandler(.GET, "", mockMiddleware);
+        tree.addHandler(.GET, "foo", mockMiddleware);
+        tree.addHandler(.GET, "foo/bar", mockMiddleware);
+
+        break :blk tree;
+    };
+
+    var macc = RT.MiddlewareAccumulator.init(std.testing.allocator);
+    defer macc.deinit();
+
+    var pacc = RT.ParamAccumulator.init(std.testing.allocator);
+    defer pacc.deinit();
+
+    var query: []const u8 = undefined;
+
+    try tree.collect(.GET, "", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, ""));
+
+    try tree.collect(.GET, "foo", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, ""));
+
+    try tree.collect(.GET, "foo?", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, ""));
+
+    try tree.collect(.GET, "foo?foo", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, "foo"));
+
+    try tree.collect(.GET, "foo?foo=123&bar=456", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, "foo=123&bar=456"));
+
+    try tree.collect(.GET, "foo/bar?", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, ""));
+
+    try tree.collect(.GET, "foo/bar?foo", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, "foo"));
+
+    try tree.collect(.GET, "foo/bar?foo=123&bar=456", &macc, &pacc, &query);
+    try std.testing.expect(std.mem.eql(u8, query, "foo=123&bar=456"));
 }
 
 test "prefixes return expected nodes" {
@@ -345,8 +401,10 @@ test "prefixes return expected nodes" {
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
+    var query: []const u8 = undefined;
+
     macc.clearRetainingCapacity();
-    try tree.collect(.GET, "foo/bar/baz/qux", &macc, &pacc);
+    try tree.collect(.GET, "foo/bar/baz/qux", &macc, &pacc, &query);
     try std.testing.expect(macc.items.len == 2);
 }
 
@@ -358,29 +416,31 @@ test "root/empty path behaves expectedly" {
     var pacc = RT.ParamAccumulator.init(std.testing.allocator);
     defer pacc.deinit();
 
+    var query: []const u8 = undefined;
+
     {
         comptime var empty_tree = RT.init();
         try std.testing.expectError(
             error.RouteNotFound,
-            empty_tree.collect(.GET, "/", &macc, &pacc),
+            empty_tree.collect(.GET, "/", &macc, &pacc, &query),
         );
     }
     {
         comptime var empty_tree = RT.init();
         try std.testing.expectError(
             error.RouteNotFound,
-            empty_tree.collect(.GET, "", &macc, &pacc),
+            empty_tree.collect(.GET, "", &macc, &pacc, &query),
         );
     }
 
     {
         comptime var tree = RT.init();
         comptime tree.addHandler(.GET, "/", mockMiddleware);
-        try tree.collect(.GET, "/", &macc, &pacc);
+        try tree.collect(.GET, "/", &macc, &pacc, &query);
     }
     {
         comptime var tree = RT.init();
         comptime tree.addHandler(.GET, "", mockMiddleware);
-        try tree.collect(.GET, "", &macc, &pacc);
+        try tree.collect(.GET, "", &macc, &pacc, &query);
     }
 }
